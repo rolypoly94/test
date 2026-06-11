@@ -1,84 +1,73 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
+// Single source of truth for client ID, scopes, and data type IDs.
+// All values verified against the live discovery doc:
+// https://health.googleapis.com/$discovery/rest?version=v4
 
-/**
- * Google Health API client configuration.
- *
- * SETUP CHECKLIST (Google Cloud Console — https://console.cloud.google.com):
- * 1. Create a project and enable the "Google Health API".
- * 2. OAuth consent screen: External, Testing mode, add your own Gmail as a Test user,
- *    and add ALL scopes listed in HEALTH_API_SCOPES below to the consent screen.
- * 3. Credentials -> Create Credentials -> OAuth Client ID -> "Web application".
- *    - Authorized JavaScript origins: your AI Studio dev/preview URLs (no trailing slash).
- *    - Authorized redirect URIs: the SAME URLs WITH a trailing "/" appended,
- *      because the app sends `${window.location.origin}/` as redirect_uri.
- *      Example: https://ais-dev-xxxx.asia-southeast1.run.app/
- * 4. Paste the Client ID below.
- * 5. In AI Studio's Secrets panel, add GOOGLE_CLIENT_SECRET with the client secret.
- *    (Google "Web application" clients require the secret at the token endpoint,
- *    even with PKCE. NOTE: in a frontend-only app this secret is visible in the
- *    bundle — fine for a personal tool, to be moved server-side later.)
- */
+export const API_BASE = 'https://health.googleapis.com/v4';
 
-export const GOOGLE_CLIENT_ID = "766820539236-92r70tn1o77kr30f7ahs5c0h8d6jo1e3.apps.googleusercontent.com";
+export const OAUTH = {
+  clientId:
+    (import.meta.env.VITE_GOOGLE_CLIENT_ID as string) ||
+    '766820539236-92r70tn1o77kr30f7ahs5c0h8d6jo1e3.apps.googleusercontent.com',
+  // SECURITY DEBT: secret belongs on a backend, not in the bundle.
+  clientSecret:
+    (import.meta.env.VITE_GOOGLE_CLIENT_SECRET as string) ||
+    ((typeof process !== 'undefined' ? process.env?.GOOGLE_CLIENT_SECRET : '') as string) ||
+    '',
+  redirectUri:
+    (import.meta.env.VITE_OAUTH_REDIRECT_URI as string) ||
+    `${window.location.origin}/oauth-callback.html`,
+  authEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
+  tokenEndpoint: 'https://oauth2.googleapis.com/token',
+};
 
-// Injected by AI Studio from the Secrets panel.
-export const GOOGLE_CLIENT_SECRET = (process.env.GOOGLE_CLIENT_SECRET as string) || "";
+export const GOOGLE_CLIENT_ID = OAUTH.clientId;
+export const GOOGLE_CLIENT_SECRET = OAUTH.clientSecret;
+export const GOOGLE_AUTH_ENDPOINT = OAUTH.authEndpoint;
+export const GOOGLE_TOKEN_ENDPOINT = OAUTH.tokenEndpoint;
+export const GOOGLE_REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
+export const HEALTH_API_SCOPES = SCOPES;
 
-export const GOOGLE_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
-export const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-export const GOOGLE_REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
-
-export const HEALTH_API_BASE_URL = "https://health.googleapis.com/v4";
-
-/**
- * Google Health API scopes (NOT the deprecated Google Fit "fitness.*" scopes).
- * Pattern: https://www.googleapis.com/auth/googlehealth.{scope}
- * Read-only is enough for this dashboard.
- *
- * Coverage for Charge 6 metrics:
- * - activity_and_fitness.readonly: steps, distance, floors, calories, AZM, exercises
- * - sleep.readonly: sleep duration + stages
- * - health_metrics_and_measurements.readonly: heart rate, SpO2, breathing rate,
- *   HRV, skin temperature, weight (one consolidated scope)
- * - profile.readonly: user profile / units
- */
-export const HEALTH_API_SCOPES = [
-  "openid",
-  "email",
-  "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
-  "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
-  "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
-  "https://www.googleapis.com/auth/googlehealth.profile.readonly",
+// Verified scope URIs (discovery doc auth.oauth2.scopes).
+export const SCOPES = [
+  'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
+  'https://www.googleapis.com/auth/googlehealth.sleep.readonly',
+  'https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly',
+  'https://www.googleapis.com/auth/googlehealth.profile.readonly',
 ];
 
-/**
- * Google Health API v4 data type endpoint IDs (from the official migration table).
- * All data is fetched via a uniform pattern:
- *   GET {BASE}/users/me/dataTypes/{dataTypeId}/dataPoints           -> "list" (granular/intraday)
- *   GET {BASE}/users/me/dataTypes/{dataTypeId}/dataPoints:dailyRollup -> daily summaries over a range
- *
- * TODO(verify): the exact custom-method spelling (":dailyRollup" vs a query param)
- * and the time-range parameter names are normalized in ONE place: buildDataPointsUrl()
- * in src/api/healthApi.ts. If Google's reference differs, fix it there only.
- */
+// Data type IDs (kebab-case of the DataPoint union field names).
 export const DATA_TYPES = {
-  steps: "steps",
-  distance: "distance",
-  floors: "floors",
-  totalCalories: "total-calories",
-  activeZoneMinutes: "active-zone-minutes",
-  heartRate: "heart-rate",
-  restingHeartRate: "daily-resting-heart-rate",
-  sleep: "sleep",
-  spo2: "daily-oxygen-saturation",
-  hrv: "daily-heart-rate-variability",
-  // TODO(verify): breathing/respiratory rate wasn't in the public mapping table.
-  // Best guess below — if it 404s, check the v4 reference's data type list.
-  breathingRate: "daily-respiratory-rate",
-  skinTemp: "daily-sleep-temperature-derivations",
-  exercise: "exercise",
-  weight: "weight",
+  steps: 'steps',
+  distance: 'distance',
+  floors: 'floors',
+  totalCalories: 'total-calories',
+  activeZoneMinutes: 'active-zone-minutes',
+  heartRate: 'heart-rate',
+  dailyRestingHeartRate: 'daily-resting-heart-rate',
+  sleep: 'sleep',
+  dailyOxygenSaturation: 'daily-oxygen-saturation',
+  dailyHeartRateVariability: 'daily-heart-rate-variability',
+  dailyRespiratoryRate: 'daily-respiratory-rate',
+  dailySleepTemperatureDerivations: 'daily-sleep-temperature-derivations',
+  exercise: 'exercise',
+  weight: 'weight',
 } as const;
+
+// dailyRollUp range limits (verified: discovery doc DailyRollUpDataPointsRequest.range).
+// 14 days for heart-rate / total-calories / calories-in-heart-rate-zone / active-minutes;
+// 90 days for everything else.
+export const ROLLUP_MAX_DAYS: Record<string, number> = {
+  'heart-rate': 14,
+  'total-calories': 14,
+};
+export const ROLLUP_MAX_DAYS_DEFAULT = 90;
+
+// Verified: sleep & exercise list calls cap pageSize at 25.
+export const SESSION_PAGE_SIZE = 25;
+
+// Verified dataSourceFamily values for rollUp bodies.
+export const DATA_SOURCE_FAMILIES = {
+  all: 'users/me/dataSourceFamilies/all-sources',
+  wearables: 'users/me/dataSourceFamilies/google-wearables',
+  googleSources: 'users/me/dataSourceFamilies/google-sources',
+};

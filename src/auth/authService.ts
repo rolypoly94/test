@@ -315,3 +315,10 @@ export class AuthService {
     this.notifyChange();
   }
 }
+
+/**
+ * Backward compatibility wrapper for healthApi.ts.
+ */
+export async function getAccessToken(): Promise<string> {
+  return await AuthService.getValidAccessToken();
+}
