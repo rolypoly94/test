@@ -1,0 +1,6 @@
+{
+  "name": "MyHealth Sync",
+  "description": "A personal health dashboard web application tracking steps, sleep stages, vital indicators, weight trends, and exercises recorded by your Fitbit Charge 6 via Google Health API.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
