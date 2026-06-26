@@ -2,7 +2,8 @@
 // All values verified against the live discovery doc:
 // https://health.googleapis.com/$discovery/rest?version=v4
 
-export const API_BASE = 'https://health.googleapis.com/v4';
+export const HEALTH_API_BASE_URL = 'https://health.googleapis.com/v4';
+export const API_BASE = HEALTH_API_BASE_URL;
 
 export const OAUTH = {
   clientId:
@@ -25,8 +26,6 @@ export const GOOGLE_CLIENT_SECRET = OAUTH.clientSecret;
 export const GOOGLE_AUTH_ENDPOINT = OAUTH.authEndpoint;
 export const GOOGLE_TOKEN_ENDPOINT = OAUTH.tokenEndpoint;
 export const GOOGLE_REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke';
-export const HEALTH_API_SCOPES = SCOPES;
-
 // Verified scope URIs (discovery doc auth.oauth2.scopes).
 export const SCOPES = [
   'https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly',
@@ -34,6 +33,8 @@ export const SCOPES = [
   'https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly',
   'https://www.googleapis.com/auth/googlehealth.profile.readonly',
 ];
+
+export const HEALTH_API_SCOPES = SCOPES;
 
 // Data type IDs (kebab-case of the DataPoint union field names).
 export const DATA_TYPES = {
@@ -44,11 +45,16 @@ export const DATA_TYPES = {
   activeZoneMinutes: 'active-zone-minutes',
   heartRate: 'heart-rate',
   dailyRestingHeartRate: 'daily-resting-heart-rate',
+  restingHeartRate: 'daily-resting-heart-rate',
   sleep: 'sleep',
   dailyOxygenSaturation: 'daily-oxygen-saturation',
+  spo2: 'daily-oxygen-saturation',
   dailyHeartRateVariability: 'daily-heart-rate-variability',
+  hrv: 'daily-heart-rate-variability',
   dailyRespiratoryRate: 'daily-respiratory-rate',
+  breathingRate: 'daily-respiratory-rate',
   dailySleepTemperatureDerivations: 'daily-sleep-temperature-derivations',
+  skinTemp: 'daily-sleep-temperature-derivations',
   exercise: 'exercise',
   weight: 'weight',
 } as const;
