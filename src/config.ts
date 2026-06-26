@@ -8,6 +8,7 @@ export const API_BASE = HEALTH_API_BASE_URL;
 export const OAUTH = {
   clientId:
     (import.meta.env.VITE_GOOGLE_CLIENT_ID as string) ||
+    ((typeof process !== 'undefined' ? process.env?.GOOGLE_CLIENT_ID : '') as string) ||
     '766820539236-92r70tn1o77kr30f7ahs5c0h8d6jo1e3.apps.googleusercontent.com',
   // SECURITY DEBT: secret belongs on a backend, not in the bundle.
   clientSecret:
@@ -16,7 +17,7 @@ export const OAUTH = {
     '',
   redirectUri:
     (import.meta.env.VITE_OAUTH_REDIRECT_URI as string) ||
-    `${window.location.origin}/oauth-callback.html`,
+    `${window.location.origin}/`,
   authEndpoint: 'https://accounts.google.com/o/oauth2/v2/auth',
   tokenEndpoint: 'https://oauth2.googleapis.com/token',
 };

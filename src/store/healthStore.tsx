@@ -167,13 +167,28 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
       const startStr = startBackfillDate.toISOString().split("T")[0];
       const endStr = today.toISOString().split("T")[0];
 
+      const stepErrors: string[] = [];
+      const handleSyncError = (err: any, stepName: string) => {
+        const msg = err?.message || String(err);
+        if (
+          msg.includes("AUTH_CONNECT_REQUIRED") ||
+          msg.includes("REAUTHENTICATION_REQUIRED") ||
+          msg.includes("SCOPES_MISSING") ||
+          msg.includes("NETWORK_ERROR")
+        ) {
+          throw err; // Propagate fatal/structural errors immediately
+        }
+        console.error(`Error syncing ${stepName}:`, err);
+        stepErrors.push(`${stepName}: ${msg}`);
+      };
+
       // Step 1: Fetch sleeping metrics (Date range queries)
       setSyncProgress(10);
       setSyncStatusText("Syncing nocturnal breathing and sleep logs...");
       try {
         newSleeps = await HealthApiClient.getSleep(startStr, endStr);
       } catch (err: any) {
-        console.error("Error syncing sleep:", err);
+        handleSyncError(err, "Sleep logs");
       }
 
       // Step 2: Fetch nightly vitals (SpO2, HRV, Breathing Rate)
@@ -182,7 +197,7 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         newVitals = await HealthApiClient.getNightlyVitals(startStr, endStr);
       } catch (err: any) {
-        console.error("Error syncing vitals:", err);
+        handleSyncError(err, "Nightly vitals");
       }
 
       // Step 3: Fetch workouts (Exercises)
@@ -191,7 +206,7 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         newWorkouts = await HealthApiClient.getWorkouts(startStr, endStr);
       } catch (err: any) {
-        console.error("Error syncing workouts:", err);
+        handleSyncError(err, "Workout records");
       }
 
       // Step 4: Fetch weight records
@@ -200,13 +215,16 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
       try {
         newWeights = await HealthApiClient.getWeights(startStr, endStr);
       } catch (err: any) {
-        console.error("Error syncing weight:", err);
+        handleSyncError(err, "Weight records");
       }
 
       // Step 5: Day-by-day fetching for activity and heart-rate summaries (due to Google REST format constraints)
       setSyncProgress(75);
       setSyncStatusText(`Reconciling daily step counts (${daysToFetch} days)...`);
       
+      let activityFailures = 0;
+      let heartRateFailures = 0;
+
       for (let offset = daysToFetch - 1; offset >= 0; offset--) {
         const progressChunk = 75 + Math.round(( (daysToFetch - offset) / daysToFetch ) * 20);
         setSyncProgress(Math.min(95, progressChunk));
@@ -224,7 +242,17 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
           } else {
             currentActivities.push(act);
           }
-        } catch (err) {
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          if (
+            msg.includes("AUTH_CONNECT_REQUIRED") ||
+            msg.includes("REAUTHENTICATION_REQUIRED") ||
+            msg.includes("SCOPES_MISSING") ||
+            msg.includes("NETWORK_ERROR")
+          ) {
+            throw err;
+          }
+          activityFailures++;
           console.warn(`Failed to sync activity on ${dateStr}`, err);
         }
 
@@ -236,12 +264,29 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
           } else {
             currentHeartRates.push(hr);
           }
-        } catch (err) {
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          if (
+            msg.includes("AUTH_CONNECT_REQUIRED") ||
+            msg.includes("REAUTHENTICATION_REQUIRED") ||
+            msg.includes("SCOPES_MISSING") ||
+            msg.includes("NETWORK_ERROR")
+          ) {
+            throw err;
+          }
+          heartRateFailures++;
           console.warn(`Failed to sync heart rate on ${dateStr}`, err);
         }
 
         // Slight rate limit spacing delay (simulate real world courtesy)
         await new Promise((r) => setTimeout(r, 100));
+      }
+
+      if (activityFailures > 0) {
+        stepErrors.push(`Daily activities: failed to sync ${activityFailures} out of ${daysToFetch} days`);
+      }
+      if (heartRateFailures > 0) {
+        stepErrors.push(`Heart rate details: failed to sync ${heartRateFailures} out of ${daysToFetch} days`);
       }
 
       // De-duplicate lists and sort by date ascending
@@ -272,17 +317,34 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
       setHealthData(finalStore);
       
       setSyncProgress(100);
-      setSyncStatusText("Synchronization completed successfully!");
+      if (stepErrors.length > 0) {
+        const hasNoDataAtAll =
+          finalStore.activities.length === 0 &&
+          finalStore.heartRates.length === 0 &&
+          finalStore.sleeps.length === 0 &&
+          finalStore.vitals.length === 0 &&
+          finalStore.workouts.length === 0 &&
+          finalStore.weights.length === 0;
+
+        if (hasNoDataAtAll || stepErrors.length >= 5) {
+          throw new Error("All health data categories failed to sync:\n" + stepErrors.join("\n"));
+        } else {
+          setSyncError("Sync completed with warnings:\n" + stepErrors.join("\n"));
+          setSyncStatusText("Synced with some warnings.");
+        }
+      } else {
+        setSyncStatusText("Synchronization completed successfully!");
+      }
       
       // Update selected display date to today if we have files
       if (finalStore.activities.length > 0) {
         setSelectedDate(finalStore.activities[finalStore.activities.length - 1].date);
       }
 
-      // Reset sync fields after 2 seconds
+      // Reset sync fields after 4 seconds to give user time to read
       setTimeout(() => {
         setSyncStatusText(null);
-      }, 2000);
+      }, 4000);
     } catch (err: any) {
       console.error("Sync process failure:", err);
       let errorMsg = err.message || "An unexpected synchronization error occurred.";

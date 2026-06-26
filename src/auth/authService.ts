@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_AUTH_ENDPOINT, GOOGLE_TOKEN_ENDPOINT, GOOGLE_REVOKE_ENDPOINT, HEALTH_API_SCOPES } from "../config";
+import { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_AUTH_ENDPOINT, GOOGLE_TOKEN_ENDPOINT, GOOGLE_REVOKE_ENDPOINT, HEALTH_API_SCOPES, OAUTH } from "../config";
 import { generateRandomString, generateCodeChallenge } from "./pkce";
 import { AuthState } from "../types";
 
@@ -87,8 +87,8 @@ export class AuthService {
 
     const codeChallenge = await generateCodeChallenge(verifier);
 
-    // Use current origin as the redirect URI
-    const redirectUri = `${window.location.origin}/`;
+    // Use configured redirect URI
+    const redirectUri = OAUTH.redirectUri;
 
     const params = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
@@ -116,21 +116,14 @@ export class AuthService {
     }
 
     return new Promise((resolve, reject) => {
-      const handleMessage = async (event: MessageEvent) => {
-        // Validate origin matches current window to maintain secure sandbox
-        if (event.origin !== window.location.origin) return;
-
-        const data = event.data;
+      const processOAuthData = async (data: any) => {
         if (data && data.type === "GOOGLE_OAUTH_CODE") {
-          // FIX: stop the popup-closed poller immediately, otherwise it fires
-          // a false "Connecting cancelled" rejection while the token exchange
-          // is still in flight (the popup closes itself right after posting).
           clearInterval(timer);
           window.removeEventListener("message", handleMessage);
+          window.removeEventListener("storage", handleStorage);
 
           const { code, state: callbackState } = data;
 
-          // Double check State to prevent CSRF attacks
           const savedState = localStorage.getItem(PKCE_STATE_KEY);
           if (callbackState !== savedState) {
             reject(new Error("Security violation: State validation failed (CSRF protection activated)."));
@@ -143,17 +136,84 @@ export class AuthService {
           } catch (err) {
             reject(err);
           }
+        } else if (data && data.type === "GOOGLE_OAUTH_ERROR") {
+          clearInterval(timer);
+          window.removeEventListener("message", handleMessage);
+          window.removeEventListener("storage", handleStorage);
+          reject(new Error(`Authentication error: ${data.error}`));
+        }
+      };
+
+      const handleMessage = async (event: MessageEvent) => {
+        // Validate origin matches current window to maintain secure sandbox
+        if (!event.origin.endsWith('.run.app') && !event.origin.includes('localhost')) {
+          return;
+        }
+        processOAuthData(event.data);
+      };
+
+      const handleStorage = (event: StorageEvent) => {
+        if (event.key === 'GOOGLE_OAUTH_RESPONSE' && event.newValue) {
+          try {
+            const data = JSON.parse(event.newValue);
+            // Ensure we only process new events
+            if (data.timestamp > Date.now() - 60000) {
+              processOAuthData(data);
+              localStorage.removeItem('GOOGLE_OAUTH_RESPONSE');
+            }
+          } catch (e) {
+            // ignore JSON parse errors
+          }
         }
       };
 
       window.addEventListener("message", handleMessage);
+      window.addEventListener("storage", handleStorage);
 
-      // Check if popup closed prematurely
+      // Check popup status and poll location as fallback/robust detection
       const timer = setInterval(() => {
+        if (!popup) {
+          clearInterval(timer);
+          window.removeEventListener("message", handleMessage);
+          window.removeEventListener("storage", handleStorage);
+          reject(new Error("Connecting cancelled: authentication window was blocked."));
+          return;
+        }
+
+        try {
+          // Same-origin policy allows reading this once redirected back to our app
+          if (popup.location && popup.location.origin === window.location.origin) {
+            const urlParams = new URLSearchParams(popup.location.search || popup.location.hash.substring(1));
+            const code = urlParams.get("code");
+            const state = urlParams.get("state");
+            const error = urlParams.get("error");
+
+            if (code || error) {
+              clearInterval(timer);
+              window.removeEventListener("message", handleMessage);
+              window.removeEventListener("storage", handleStorage);
+              popup.close();
+
+              if (code) {
+                processOAuthData({ type: "GOOGLE_OAUTH_CODE", code, state });
+              } else {
+                processOAuthData({ type: "GOOGLE_OAUTH_ERROR", error });
+              }
+              return;
+            }
+          }
+        } catch (e) {
+          // Cross-origin exception is expected while the popup is on Google's domain
+        }
+
         if (popup.closed) {
           clearInterval(timer);
           window.removeEventListener("message", handleMessage);
-          reject(new Error("Connecting cancelled: authentication window closed."));
+          window.removeEventListener("storage", handleStorage);
+          // Wait briefly in case a final message or storage event is in flight.
+          setTimeout(() => {
+            reject(new Error("Connecting cancelled: authentication window closed."));
+          }, 1000);
         }
       }, 500);
     });
@@ -168,7 +228,7 @@ export class AuthService {
       throw new Error("Missing PKCE code verifier in local device storage.");
     }
 
-    const redirectUri = `${window.location.origin}/`;
+    const redirectUri = OAUTH.redirectUri;
 
     const body = new URLSearchParams({
       client_id: GOOGLE_CLIENT_ID,
