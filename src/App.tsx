@@ -12,6 +12,8 @@ function AppContent() {
     authState,
     isDemoMode,
     isSyncing,
+    syncProgress,
+    syncStatusText,
     syncError,
     healthData,
     login,
@@ -42,8 +44,16 @@ function AppContent() {
           {lastSyncDate && !isDemoMode && <span className="badge">Last sync: {new Date(lastSyncDate).toLocaleString()}</span>}
           {signedIn ? (
             <>
-              <button onClick={() => syncData().catch(() => {})} disabled={isSyncing}>
-                {isSyncing ? 'Syncing…' : 'Sync'}
+              <button className="relative overflow-hidden" onClick={() => syncData().catch(() => {})} disabled={isSyncing}>
+                {isSyncing ? (
+                  <>
+                    <div 
+                      className="absolute left-0 top-0 bottom-0 bg-white/20 transition-all duration-300"
+                      style={{ width: `${syncProgress}%` }}
+                    />
+                    <span className="relative z-10">{syncProgress}% - {syncStatusText || 'Syncing…'}</span>
+                  </>
+                ) : 'Sync'}
               </button>
               <button className="secondary" onClick={disconnect}>Sign out</button>
             </>
@@ -104,8 +114,16 @@ function AppContent() {
             </div>
             
             <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem", alignItems: "center" }}>
-              <button onClick={() => syncData(true)} disabled={isSyncing}>
-                {isSyncing ? "Syncing..." : "Force Full 90-Day Sync"}
+              <button className="relative overflow-hidden" onClick={() => syncData(true)} disabled={isSyncing}>
+                {isSyncing ? (
+                  <>
+                    <div 
+                      className="absolute left-0 top-0 bottom-0 bg-white/20 transition-all duration-300"
+                      style={{ width: `${syncProgress}%` }}
+                    />
+                    <span className="relative z-10">{syncProgress}% - {syncStatusText || 'Syncing…'}</span>
+                  </>
+                ) : "Force Full 90-Day Sync"}
               </button>
               <button className="secondary" onClick={toggleDemoMode}>
                 Use Simulated Demo Data (Immediate View)

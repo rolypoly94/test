@@ -113,7 +113,7 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
   }, []);
 
   /**
-   * Performs an incremental delta sync since last sync date, or full 90-day backfill.
+   * Performs an incremental delta sync since last sync date, or full 365-day backfill.
    */
   const syncData = useCallback(async (forceBackfill = false) => {
     if (isDemoMode) {
@@ -123,11 +123,11 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
       setSyncStatusText("Simulating Google API handshake...");
       await new Promise((r) => setTimeout(r, 600));
       setSyncProgress(60);
-      setSyncStatusText("Regenerating 90-day statistical models...");
+      setSyncStatusText("Regenerating 365-day statistical models...");
       await new Promise((r) => setTimeout(r, 600));
       setSyncProgress(100);
       setSyncStatusText("Cached inside sandbox IndexedDB!");
-      
+
       const refreshedDemo = generate90DayHealthData();
       setHealthData(refreshedDemo);
       setIsSyncing(false);
@@ -137,25 +137,41 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
 
     setIsSyncing(true);
     setSyncProgress(0);
-    setSyncStatusText("Connecting to google health endpoints...");
+    setSyncStatusText("Connecting to Google Health endpoints...");
     setSyncError(null);
+
+    /** Split a date range into 90-day chunks (rollup API limit). */
+    const chunkDateRange = (start: string, end: string, chunkDays = 90): Array<[string, string]> => {
+      const chunks: Array<[string, string]> = [];
+      let cur = new Date(`${start}T00:00:00Z`);
+      const endDt = new Date(`${end}T00:00:00Z`);
+      while (cur <= endDt) {
+        const chunkEnd = new Date(cur);
+        chunkEnd.setUTCDate(chunkEnd.getUTCDate() + chunkDays - 1);
+        if (chunkEnd > endDt) chunkEnd.setTime(endDt.getTime());
+        chunks.push([cur.toISOString().slice(0, 10), chunkEnd.toISOString().slice(0, 10)]);
+        cur = new Date(chunkEnd);
+        cur.setUTCDate(cur.getUTCDate() + 1);
+      }
+      return chunks;
+    };
 
     try {
       const today = new Date();
       let daysToFetch = 90;
       let lastSyncDate: Date | null = null;
-      
+
       const cached = await loadHealthData();
-      if (cached && cached.lastSyncTime && !forceBackfill) {
+      if (cached && cached.lastSyncTime && !forceBackfill && cached.activities.length > 85) {
         lastSyncDate = new Date(cached.lastSyncTime);
         const diffTime = Math.abs(today.getTime() - lastSyncDate.getTime());
-        daysToFetch = Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
+        daysToFetch = Math.max(1, Math.min(90, Math.ceil(diffTime / (1000 * 60 * 60 * 24))));
       }
 
       // Restructure local arrays
       const currentActivities = cached ? [...cached.activities] : [];
       const currentHeartRates = cached ? [...cached.heartRates] : [];
-      
+
       // Accumulators for series/date ranges
       let newSleeps: DailySleep[] = [];
       let newVitals: NightlyVitals[] = [];
@@ -182,104 +198,98 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
         stepErrors.push(`${stepName}: ${msg}`);
       };
 
-      // Step 1: Fetch sleeping metrics (Date range queries)
+      const dateChunks = chunkDateRange(startStr, endStr, 90);
+
+      // Step 1: Fetch sleeping metrics in 90-day chunks
       setSyncProgress(10);
-      setSyncStatusText("Syncing nocturnal breathing and sleep logs...");
+      setSyncStatusText(`Syncing sleep logs (${daysToFetch} days)...`);
       try {
-        newSleeps = await HealthApiClient.getSleep(startStr, endStr);
+        for (const [cs, ce] of dateChunks) {
+          const chunk = await HealthApiClient.getSleep(cs, ce);
+          newSleeps.push(...chunk);
+        }
       } catch (err: any) {
         handleSyncError(err, "Sleep logs");
       }
 
-      // Step 2: Fetch nightly vitals (SpO2, HRV, Breathing Rate)
-      setSyncProgress(30);
-      setSyncStatusText("Acquiring nightly SpO2 and temperatures...");
+      // Step 2: Fetch nightly vitals in 90-day chunks
+      setSyncProgress(25);
+      setSyncStatusText(`Acquiring nightly vitals (${daysToFetch} days)...`);
       try {
-        newVitals = await HealthApiClient.getNightlyVitals(startStr, endStr);
+        for (const [cs, ce] of dateChunks) {
+          const chunk = await HealthApiClient.getNightlyVitals(cs, ce);
+          newVitals.push(...chunk);
+        }
       } catch (err: any) {
         handleSyncError(err, "Nightly vitals");
       }
 
-      // Step 3: Fetch workouts (Exercises)
-      setSyncProgress(50);
-      setSyncStatusText("Downloading workout records...");
+      // Step 3: Fetch workouts in 90-day chunks
+      setSyncProgress(40);
+      setSyncStatusText(`Downloading workout records (${daysToFetch} days)...`);
       try {
-        newWorkouts = await HealthApiClient.getWorkouts(startStr, endStr);
+        for (const [cs, ce] of dateChunks) {
+          const chunk = await HealthApiClient.getWorkouts(cs, ce);
+          newWorkouts.push(...chunk);
+        }
       } catch (err: any) {
         handleSyncError(err, "Workout records");
       }
 
-      // Step 4: Fetch weight records
-      setSyncProgress(65);
-      setSyncStatusText("Syncing body composition logs...");
+      // Step 4: Fetch weight records in 90-day chunks (rollup API limited to 90 days)
+      setSyncProgress(55);
+      setSyncStatusText(`Syncing body composition logs (${daysToFetch} days)...`);
       try {
-        newWeights = await HealthApiClient.getWeights(startStr, endStr);
+        for (const [cs, ce] of dateChunks) {
+          const chunk = await HealthApiClient.getWeights(cs, ce);
+          newWeights.push(...chunk);
+        }
       } catch (err: any) {
         handleSyncError(err, "Weight records");
       }
 
-      // Step 5: Day-by-day fetching for activity and heart-rate summaries (due to Google REST format constraints)
-      setSyncProgress(75);
+      // Step 5: Batch fetching for activities (chunks)
+      setSyncProgress(65);
       setSyncStatusText(`Reconciling daily step counts (${daysToFetch} days)...`);
       
       let activityFailures = 0;
       let heartRateFailures = 0;
 
-      for (let offset = daysToFetch - 1; offset >= 0; offset--) {
-        const progressChunk = 75 + Math.round(( (daysToFetch - offset) / daysToFetch ) * 20);
-        setSyncProgress(Math.min(95, progressChunk));
-
-        const targetDate = new Date();
-        targetDate.setDate(today.getDate() - offset);
-        const dateStr = targetDate.toISOString().split("T")[0];
-        setSyncStatusText(`Syncing data for ${dateStr}...`);
-
-        try {
-          const act = await HealthApiClient.getActivitySummary(dateStr);
-          const idx = currentActivities.findIndex((a) => a.date === dateStr);
-          if (idx >= 0) {
-            currentActivities[idx] = act;
-          } else {
-            currentActivities.push(act);
+      try {
+        for (const [cs, ce] of dateChunks) {
+          const actChunk = await HealthApiClient.getActivities(cs, ce);
+          for (const act of actChunk) {
+            const idx = currentActivities.findIndex((a) => a.date === act.date);
+            if (idx >= 0) {
+              currentActivities[idx] = act;
+            } else {
+              currentActivities.push(act);
+            }
           }
-        } catch (err: any) {
-          const msg = err?.message || String(err);
-          if (
-            msg.includes("AUTH_CONNECT_REQUIRED") ||
-            msg.includes("REAUTHENTICATION_REQUIRED") ||
-            msg.includes("SCOPES_MISSING") ||
-            msg.includes("NETWORK_ERROR")
-          ) {
-            throw err;
-          }
-          activityFailures++;
-          console.warn(`Failed to sync activity on ${dateStr}`, err);
         }
+      } catch (err: any) {
+        handleSyncError(err, "Activity records");
+        activityFailures++;
+      }
 
-        try {
-          const hr = await HealthApiClient.getHeartRate(dateStr);
-          const idx = currentHeartRates.findIndex((h) => h.date === dateStr);
-          if (idx >= 0) {
-            currentHeartRates[idx] = hr;
-          } else {
-            currentHeartRates.push(hr);
+      setSyncProgress(80);
+      setSyncStatusText(`Syncing heart-rate logs (${daysToFetch} days). This takes ~1-2 minutes to respect rate limits...`);
+
+      try {
+        for (const [cs, ce] of dateChunks) {
+          const hrChunk = await HealthApiClient.getHeartRatesBatch(cs, ce);
+          for (const hr of hrChunk) {
+            const idx = currentHeartRates.findIndex((h) => h.date === hr.date);
+            if (idx >= 0) {
+              currentHeartRates[idx] = hr;
+            } else {
+              currentHeartRates.push(hr);
+            }
           }
-        } catch (err: any) {
-          const msg = err?.message || String(err);
-          if (
-            msg.includes("AUTH_CONNECT_REQUIRED") ||
-            msg.includes("REAUTHENTICATION_REQUIRED") ||
-            msg.includes("SCOPES_MISSING") ||
-            msg.includes("NETWORK_ERROR")
-          ) {
-            throw err;
-          }
-          heartRateFailures++;
-          console.warn(`Failed to sync heart rate on ${dateStr}`, err);
         }
-
-        // Slight rate limit spacing delay (simulate real world courtesy)
-        await new Promise((r) => setTimeout(r, 100));
+      } catch (err: any) {
+        handleSyncError(err, "Heart rate details");
+        heartRateFailures++;
       }
 
       if (activityFailures > 0) {

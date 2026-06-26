@@ -196,8 +196,8 @@ export const HeartRateChart: React.FC<HeartRateChartProps> = ({ heartRates, sele
         {/* Intraday Area Chart */}
         <div className="h-60 w-full mt-2">
           {!selectedDayLog || !selectedDayLog.intraday || selectedDayLog.intraday.length === 0 ? (
-            <div className="h-full flex items-center justify-center text-slate-500 font-mono text-xs">
-              No intraday heart rate logs found for {selectedDate}. Click a date on the resting trend to load logs.
+            <div className="h-full flex items-center justify-center text-slate-500 font-mono text-xs text-center px-4">
+              No intraday heart rate logs found for {selectedDate}.
             </div>
           ) : (
             <ResponsiveContainer width="100%" height="100%">
