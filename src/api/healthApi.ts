@@ -8,28 +8,28 @@ import { HEALTH_API_BASE_URL, DATA_TYPES } from "../config";
 import { DailyActivity, DailyHeartRate, DailySleep, NightlyVitals, WorkoutLog, WeightRecord } from "../types";
 
 /**
- * Google Health API v4 client — v2, written against the verified reference
- * (developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints).
+ * Google Health API v4 client.
  *
- * Two endpoint styles:
- *  1. Daily rollups (steps, distance, floors, calories, AZM, weight, resting HR, HRV):
- *       POST /users/me/dataTypes/{id}/dataPoints:dailyRollUp        <- capital U, POST!
- *       body: { range: { start: CivilDateTime, end: CivilDateTime }, windowSizeDays: 1 }
- *       range is CLOSED-OPEN, so end = day after the last day you want.
- *       response: { rollupDataPoints: [ { civilStartTime, civilEndTime, <unionValue> } ] }
- *  2. List (sleep, exercise, intraday heart rate, daily summaries not supported by rollup
- *     like SpO2 / skin temp / breathing rate):
- *       GET /users/me/dataTypes/{id}/dataPoints?filter=<AIP-160 expression>&pageSize=
- *       Filter field depends on data type, e.g.:
- *         steps.interval.start_time >= "..." (RFC-3339)
- *         dailyRestingHeartRate.date >= "YYYY-MM-DD"
- *         sleep.interval.end_time >= "..." (RFC-3339)
+ * Request/response shapes below are taken from the live discovery document
+ * (https://health.googleapis.com/$discovery/rest?version=v4), not guessed:
+ *
+ *  1. Daily rollups (steps, distance, floors, total-calories, active-zone-minutes, weight):
+ *       POST /users/me/dataTypes/{id}/dataPoints:dailyRollUp
+ *       body: { range: CivilTimeInterval, windowSizeDays: 1 }
+ *       CivilTimeInterval = { start: CivilDateTime, end: CivilDateTime }   (closed-open)
+ *       CivilDateTime     = { date: { year, month, day }, time? }
+ *       response: { rollupDataPoints: [ { civilStartTime: CivilDateTime, <union>: {...} } ] }
+ *       Units matter: distance is millimeters, weight is grams, AZM is split per HR zone.
+ *
+ *  2. List (daily summaries, intraday heart-rate sample, sleep & exercise sessions):
+ *       GET /users/me/dataTypes/{id}/dataPoints?filter=<AIP-160>&pageSize=
+ *       Filter field token is the snake_case form of the data type id, e.g.
+ *         daily_resting_heart_rate.date >= "YYYY-MM-DD"
+ *         heart_rate.sample_time.physical_time >= "...Z"   (heart-rate is a SAMPLE type)
+ *         sleep.interval.end_time >= "...Z"
  *         exercise.interval.civil_start_time >= "YYYY-MM-DD"
- *       sleep & exercise: max pageSize 25 -> must paginate with nextPageToken.
- *
- * Response VALUE field names inside data points are still partially unverified
- * (e.g. StepsRollupValue's exact field names), so value extraction stays defensive
- * and unknown shapes are logged once per data type with a "[SHAPE]" prefix.
+ *       response: { dataPoints: [ DataPoint ], nextPageToken }
+ *       Each DataPoint carries the value under a camelCase union field matching its type.
  */
 
 // ---------------------------------------------------------------------------
@@ -99,122 +99,112 @@ async function apiRequest(path: string, options: RequestInit = {}): Promise<any>
 }
 
 // ---------------------------------------------------------------------------
-// Date helpers (CivilDateTime + closed-open ranges)
+// Small value / date / unit helpers
 // ---------------------------------------------------------------------------
 
-/** "YYYY-MM-DD" -> CivilDateTime object for request bodies. */
-function toCivilDateTime(date: string) {
-  const [y, m, d] = date.split("-").map(Number);
-  return { year: y, month: m, day: d };
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/** int64-as-string or plain number -> finite number (0 otherwise). */
+function num(v: any): number {
+  const n = typeof v === "string" ? Number(v) : v;
+  return typeof n === "number" && isFinite(n) ? n : 0;
 }
 
-/** "YYYY-MM-DD" -> the next day, for closed-open range ends and "< nextDay" filters. */
+/**
+ * Round to a fixed number of decimals, returning a clean Number (no IEEE-754
+ * artifacts like 0.30000000000000004) so the UI never renders raw float noise.
+ */
+function roundTo(value: number, decimals = 0): number {
+  if (!isFinite(value)) return 0;
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
+/** Snake_case filter token for a data type id, e.g. "daily-resting-heart-rate" -> "daily_resting_heart_rate". */
+function filterToken(dataType: string): string {
+  return dataType.replace(/-/g, "_");
+}
+
+/** "YYYY-MM-DD" -> CivilDateTime request value: { date: { year, month, day } }. */
+function toCivilDateTime(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  return { date: { year, month, day } };
+}
+
+/** "YYYY-MM-DD" -> the next day (for closed-open range ends and "< nextDay" filters). */
 function nextDay(date: string): string {
   const dt = new Date(`${date}T00:00:00Z`);
   dt.setUTCDate(dt.getUTCDate() + 1);
   return dt.toISOString().slice(0, 10);
 }
 
-/** CivilDateTime object (from responses) -> "YYYY-MM-DD". */
-function fromCivilDateTime(c: any): string | null {
-  if (!c || typeof c !== "object" || !c.year) return null;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${c.year}-${pad(c.month ?? 1)}-${pad(c.day ?? 1)}`;
-}
-
-// ---------------------------------------------------------------------------
-// Defensive value extraction + shape logging
-// ---------------------------------------------------------------------------
-
-const loggedShapes = new Set<string>();
-
-function logShapeOnce(dataType: string, json: any) {
-  if (loggedShapes.has(dataType)) return;
-  loggedShapes.add(dataType);
-  console.warn(`[SHAPE] Unrecognized response for "${dataType}" — copy this into Claude to fix the mapping:`,
-    JSON.stringify(json).slice(0, 2000));
-}
-
 /**
- * Pull a single representative number out of a rollup/data value object.
- * Field names follow "{field}_{aggregation}" (e.g. count_sum) per the docs but the
- * exact JSON casing is unverified, so we score candidate keys by preference.
+ * Resolve a "YYYY-MM-DD" string from either a CivilDateTime ({ date: { year, month, day } })
+ * or a bare Date ({ year, month, day }) — daily summaries use the latter, rollups the former.
  */
-function extractNumber(obj: any): number | null {
-  if (typeof obj === "number") return obj;
-  if (!obj || typeof obj !== "object") return null;
-  const entries: { key: string; value: number }[] = [];
-  const walk = (o: any, prefix: string) => {
-    for (const k of Object.keys(o)) {
-      const v = o[k];
-      if (typeof v === "number") entries.push({ key: `${prefix}${k}`.toLowerCase(), value: v });
-      else if (typeof v === "string" && v !== "" && !isNaN(Number(v))) entries.push({ key: `${prefix}${k}`.toLowerCase(), value: Number(v) });
-      else if (v && typeof v === "object" && !Array.isArray(v)) walk(v, `${prefix}${k}.`);
-    }
-  };
-  walk(obj, "");
-  if (entries.length === 0) return null;
-  const score = (k: string) =>
-    k.includes("sum") || k.includes("total") ? 3 :
-    k.includes("avg") || k.includes("average") || k.includes("mean") ? 2 :
-    k.includes("value") || k.includes("count") || k.includes("amount") ? 1 : 0;
-  entries.sort((a, b) => score(b.key) - score(a.key));
-  return entries[0].value;
+function civilToDateStr(c: any): string | null {
+  const d = c?.date ?? c;
+  if (!d || !d.year) return null;
+  return `${d.year}-${pad(d.month ?? 1)}-${pad(d.day ?? 1)}`;
 }
 
-/**
- * Round a value to a fixed number of decimals, returning a clean Number (no IEEE-754
- * artifacts like 0.30000000000000004). The simulated/demo data is pre-rounded, so the
- * UI assumes clean numbers; live API values flow through extractNumber() unrounded and
- * must be normalised here or they render with full float precision and overflow the cards.
- */
-function roundTo(value: number | null, decimals = 0): number {
-  if (value === null || !isFinite(value)) return 0;
-  const factor = 10 ** decimals;
-  return Math.round(value * factor) / factor;
+/** CivilDateTime -> "HH:MM" using its civil time-of-day, or null if no time component. */
+function civilToTimeStr(c: any): string | null {
+  const t = c?.time;
+  if (!t || (t.hours == null && t.minutes == null)) return null;
+  return `${pad(t.hours ?? 0)}:${pad(t.minutes ?? 0)}`;
 }
 
-/** The non-time field of a rollupDataPoint is the union value (e.g. "steps": {...}). */
-function rollupUnionValue(point: any): any {
-  if (!point || typeof point !== "object") return null;
-  for (const k of Object.keys(point)) {
-    if (k !== "civilStartTime" && k !== "civilEndTime" && typeof point[k] === "object") return point[k];
-  }
-  return null;
+/** google-duration string ("2100s", "12.5s") -> minutes. */
+function durationToMinutes(s: any): number {
+  if (typeof s !== "string") return 0;
+  const seconds = parseFloat(s.replace(/s$/, ""));
+  return isFinite(seconds) ? seconds / 60 : 0;
+}
+
+/** Minutes between RFC-3339 start/end timestamps of a SessionTimeInterval. */
+function intervalMinutes(interval: any): number {
+  const start = interval?.startTime, end = interval?.endTime;
+  if (typeof start !== "string" || typeof end !== "string") return 0;
+  const ms = new Date(end).getTime() - new Date(start).getTime();
+  return ms > 0 ? ms / 60000 : 0;
+}
+
+/** "RUNNING" / "FUNCTIONAL_STRENGTH_TRAINING" -> "Running" / "Functional Strength Training". */
+function prettyExerciseType(type: any): string {
+  if (typeof type !== "string" || !type || type === "EXERCISE_TYPE_UNSPECIFIED") return "Exercise";
+  return type.toLowerCase().split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
 }
 
 // ---------------------------------------------------------------------------
 // Endpoint wrappers
 // ---------------------------------------------------------------------------
 
-/** POST dataPoints:dailyRollUp over [startDate, endDate] inclusive -> Map of date -> value. */
-async function fetchDailyRollUp(dataType: string, startDate: string, endDate: string): Promise<Map<string, number>> {
-  const result = new Map<string, number>();
-  let json: any;
+/** POST dataPoints:dailyRollUp over [startDate, endDate] inclusive -> raw rollup points. */
+async function fetchRollupPoints(dataType: string, startDate: string, endDate: string): Promise<any[]> {
   try {
-    json = await apiRequest(`/users/me/dataTypes/${dataType}/dataPoints:dailyRollUp`, {
+    const json = await apiRequest(`/users/me/dataTypes/${dataType}/dataPoints:dailyRollUp`, {
       method: "POST",
       body: JSON.stringify({
         range: { start: toCivilDateTime(startDate), end: toCivilDateTime(nextDay(endDate)) }, // closed-open
         windowSizeDays: 1,
       }),
     });
+    return json?.rollupDataPoints ?? [];
   } catch (err) {
     console.warn(`Rollup failed for "${dataType}":`, err);
-    return result;
+    return [];
   }
-  const points = json?.rollupDataPoints ?? [];
-  if (points.length === 0 && json && Object.keys(json).length > 0) logShapeOnce(dataType, json);
-  for (const p of points) {
-    const d = fromCivilDateTime(p.civilStartTime);
-    const v = extractNumber(rollupUnionValue(p));
-    if (d !== null && v !== null) result.set(d, v);
-    else logShapeOnce(dataType, p);
-  }
-  return result;
 }
 
-/** GET dataPoints list with an AIP-160 filter; paginates (needed for sleep/exercise, max 25/page). */
+/** Single-day rollup -> extracted numeric value (0 if absent). */
+async function fetchRollupValue(dataType: string, date: string, extract: (point: any) => number): Promise<number> {
+  const points = await fetchRollupPoints(dataType, date, date);
+  const point = points.find((p) => civilToDateStr(p.civilStartTime) === date) ?? points[0];
+  return point ? extract(point) : 0;
+}
+
+/** GET dataPoints list with an AIP-160 filter; paginates via nextPageToken. */
 async function fetchList(dataType: string, filter: string, pageSize = 1000): Promise<any[]> {
   const all: any[] = [];
   let pageToken: string | undefined;
@@ -229,30 +219,29 @@ async function fetchList(dataType: string, filter: string, pageSize = 1000): Pro
       console.warn(`List failed for "${dataType}":`, err);
       break;
     }
-    const points = json?.dataPoints ?? [];
-    if (points.length === 0 && all.length === 0 && json && Object.keys(json).filter(k => k !== "nextPageToken").length > 0) {
-      logShapeOnce(dataType, json);
-    }
-    all.push(...points);
+    all.push(...(json?.dataPoints ?? []));
     pageToken = json?.nextPageToken || undefined;
-  } while (pageToken && ++guard < 20);
+  } while (pageToken && ++guard < 50);
   return all;
 }
 
-/** Daily-summary data types (resting HR, HRV, SpO2, skin temp...) filter on "{camelType}.date". */
-async function fetchDailySummaries(dataType: string, filterField: string, startDate: string, endDate: string): Promise<Map<string, number>> {
+/** Daily-summary list -> Map of date -> value, using the snake_case ".date" filter. */
+async function fetchDailySummary(
+  dataType: string,
+  unionKey: string,
+  startDate: string,
+  endDate: string,
+  getValue: (union: any) => number,
+): Promise<Map<string, number>> {
+  const token = filterToken(dataType);
+  const filter = `${token}.date >= "${startDate}" AND ${token}.date < "${nextDay(endDate)}"`;
+  const points = await fetchList(dataType, filter, 1000);
   const result = new Map<string, number>();
-  const filter = `${filterField}.date >= "${startDate}" AND ${filterField}.date < "${nextDay(endDate)}"`;
-  const points = await fetchList(dataType, filter);
   for (const p of points) {
-    // Expected shape: { <unionField>: { date | value fields } } — extract defensively.
-    const union = rollupUnionValue(p) ?? p;
-    const d = (typeof union.date === "string" && union.date.slice(0, 10)) ||
-              fromCivilDateTime(union.date) ||
-              (typeof p.date === "string" && p.date.slice(0, 10)) || null;
-    const v = extractNumber(union);
-    if (d !== null && v !== null) result.set(d, v);
-    else logShapeOnce(dataType, p);
+    const union = p[unionKey];
+    if (!union) continue;
+    const date = civilToDateStr(union.date);
+    if (date) result.set(date, getValue(union));
   }
   return result;
 }
@@ -264,42 +253,52 @@ async function fetchDailySummaries(dataType: string, filterField: string, startD
 export class HealthApiClient {
 
   static async getActivitySummary(date: string): Promise<DailyActivity> {
-    const [steps, distance, floors, calories, azm] = await Promise.all([
-      fetchDailyRollUp(DATA_TYPES.steps, date, date),
-      fetchDailyRollUp(DATA_TYPES.distance, date, date),
-      fetchDailyRollUp(DATA_TYPES.floors, date, date),
-      fetchDailyRollUp(DATA_TYPES.totalCalories, date, date), // 14-day max range; single day is fine
-      fetchDailyRollUp(DATA_TYPES.activeZoneMinutes, date, date),
+    const [steps, distanceMm, floors, kcal, azm] = await Promise.all([
+      fetchRollupValue(DATA_TYPES.steps, date, (p) => num(p.steps?.countSum)),
+      fetchRollupValue(DATA_TYPES.distance, date, (p) => num(p.distance?.millimetersSum)),
+      fetchRollupValue(DATA_TYPES.floors, date, (p) => num(p.floors?.countSum)),
+      fetchRollupValue(DATA_TYPES.totalCalories, date, (p) => num(p.totalCalories?.kcalSum)),
+      fetchRollupValue(DATA_TYPES.activeZoneMinutes, date, (p) =>
+        num(p.activeZoneMinutes?.sumInPeakHeartZone) +
+        num(p.activeZoneMinutes?.sumInFatBurnHeartZone) +
+        num(p.activeZoneMinutes?.sumInCardioHeartZone),
+      ),
     ]);
     return {
       date,
-      steps: roundTo(steps.get(date) ?? 0),
-      // TODO(verify): DistanceRollupValue unit (meters assumed; check [SHAPE]/values and adjust)
-      distanceKm: distance.has(date) ? roundTo(distance.get(date)! / 1000, 2) : 0,
-      floors: roundTo(floors.get(date) ?? 0),
-      caloriesBurned: roundTo(calories.get(date) ?? 0),
-      activeZoneMinutes: roundTo(azm.get(date) ?? 0),
+      steps: roundTo(steps),
+      distanceKm: roundTo(distanceMm / 1_000_000, 2), // millimeters -> km
+      floors: roundTo(floors),
+      caloriesBurned: roundTo(kcal),
+      activeZoneMinutes: roundTo(azm),
     };
   }
 
   static async getHeartRate(date: string): Promise<DailyHeartRate> {
-    const restingMap = await fetchDailySummaries(DATA_TYPES.restingHeartRate, "dailyRestingHeartRate", date, date);
+    // Resting HR: daily-summary list filtered on its snake_case ".date" field.
+    const restingMap = await fetchDailySummary(
+      DATA_TYPES.restingHeartRate, "dailyRestingHeartRate", date, date,
+      (u) => num(u.beatsPerMinute),
+    );
 
-    // Intraday heart rate via list. heart-rate is an interval data type:
-    // filter field heartRate.interval.start_time with RFC-3339 timestamps.
-    const filter = `heartRate.interval.start_time >= "${date}T00:00:00Z" AND heartRate.interval.start_time < "${nextDay(date)}T00:00:00Z"`;
-    const points = await fetchList(DATA_TYPES.heartRate, filter, 1440);
+    // Intraday HR: heart-rate is a SAMPLE type -> filter on sample_time.physical_time (RFC-3339).
+    const token = filterToken(DATA_TYPES.heartRate); // "heart_rate"
+    const filter =
+      `${token}.sample_time.physical_time >= "${date}T00:00:00Z" AND ` +
+      `${token}.sample_time.physical_time < "${nextDay(date)}T00:00:00Z"`;
+    const points = await fetchList(DATA_TYPES.heartRate, filter, 10000);
 
     const intraday = points
       .map((p: any) => {
-        const union = rollupUnionValue(p) ?? p;
-        const ts = union.interval?.startTime ?? union.startTime ?? p.interval?.startTime ?? null;
-        const bpm = extractNumber(union);
-        if (bpm === null) return null;
-        const time = typeof ts === "string" && ts.includes("T") ? ts.slice(11, 16) : "00:00";
-        return { time, bpm: roundTo(bpm) };
+        const hr = p.heartRate;
+        if (!hr) return null;
+        const time =
+          civilToTimeStr(hr.sampleTime?.civilTime) ??
+          (typeof hr.sampleTime?.physicalTime === "string" ? hr.sampleTime.physicalTime.slice(11, 16) : "00:00");
+        return { time, bpm: roundTo(num(hr.beatsPerMinute)) };
       })
       .filter(Boolean) as { time: string; bpm: number }[];
+    intraday.sort((a, b) => a.time.localeCompare(b.time));
 
     return {
       date,
@@ -309,87 +308,114 @@ export class HealthApiClient {
   }
 
   static async getSleep(startDate: string, endDate: string): Promise<DailySleep[]> {
-    // Sleep filters on session end time (RFC-3339). Max pageSize 25 -> fetchList paginates.
-    const filter = `sleep.interval.end_time >= "${startDate}T00:00:00Z" AND sleep.interval.end_time < "${nextDay(endDate)}T00:00:00Z"`;
-    const sessions = await fetchList(DATA_TYPES.sleep, filter, 25);
+    // Sleep sessions filter on end_time (RFC-3339). Max pageSize 25 -> fetchList paginates.
+    const filter =
+      `sleep.interval.end_time >= "${startDate}T00:00:00Z" AND ` +
+      `sleep.interval.end_time < "${nextDay(endDate)}T00:00:00Z"`;
+    const points = await fetchList(DATA_TYPES.sleep, filter, 25);
 
-    return sessions.map((p: any) => {
-      const sl = rollupUnionValue(p) ?? p;
-      const endTs = sl.interval?.endTime ?? p.interval?.endTime ?? null;
-      const date = (typeof endTs === "string" && endTs.slice(0, 10)) || startDate;
-      // Stage minutes: try common containers; log shape if nothing matches.
-      const stages = sl.stages ?? sl.stageSummary ?? sl.levels?.summary ?? {};
-      const stageMin = (name: string) => {
-        const s = stages[name] ?? stages[`${name}Minutes`] ?? null;
-        return s === null ? 0 : roundTo(extractNumber(s) ?? 0);
-      };
-      const duration =
-        extractNumber(sl.durationMinutes) ??
-        extractNumber(sl.minutesAsleep) ??
-        // TODO(verify): if "duration" is a protobuf Duration string like "28800s", parse seconds
-        (typeof sl.duration === "string" && sl.duration.endsWith("s") ? Math.round(parseInt(sl.duration) / 60) : null) ??
-        0;
-      if (duration === 0 && stageMin("light") === 0 && stageMin("deep") === 0) logShapeOnce(DATA_TYPES.sleep, p);
-      return {
-        date,
-        durationMinutes: roundTo(duration),
-        sleepScore: roundTo(extractNumber(sl.sleepScore ?? sl.score ?? sl.efficiency) ?? 0),
-        stages: {
-          deepMinutes: stageMin("deep"),
-          lightMinutes: stageMin("light"),
-          remMinutes: stageMin("rem"),
-          awakeMinutes: stageMin("awake") || stageMin("wake"),
-        },
-      };
-    });
+    return points
+      .map((p: any) => {
+        const sl = p.sleep;
+        if (!sl) return null;
+        const date =
+          civilToDateStr(sl.interval?.civilEndTime) ??
+          (typeof sl.interval?.endTime === "string" ? sl.interval.endTime.slice(0, 10) : startDate);
+
+        const summary = sl.summary ?? {};
+        const stages: any[] = summary.stagesSummary ?? [];
+        const stageMinutes = (type: string) => num(stages.find((s) => s.type === type)?.minutes);
+
+        const inPeriod = num(summary.minutesInSleepPeriod);
+        const asleep = num(summary.minutesAsleep);
+        const duration = inPeriod || asleep; // total time in the sleep period
+        // The API has no "sleep score" field; surface sleep efficiency (% asleep) as the score.
+        const score = inPeriod ? Math.round((asleep / inPeriod) * 100) : 0;
+
+        return {
+          date,
+          durationMinutes: roundTo(duration),
+          sleepScore: roundTo(score),
+          stages: {
+            deepMinutes: roundTo(stageMinutes("DEEP")),
+            lightMinutes: roundTo(stageMinutes("LIGHT")),
+            remMinutes: roundTo(stageMinutes("REM")),
+            // "stages" sleep reports AWAKE; "classic" sleep reports RESTLESS as wake time.
+            awakeMinutes: roundTo(stageMinutes("AWAKE") || stageMinutes("RESTLESS")),
+          },
+        };
+      })
+      .filter(Boolean) as DailySleep[];
   }
 
   static async getNightlyVitals(startDate: string, endDate: string): Promise<NightlyVitals[]> {
-    // These daily-summary types are not supported by dailyRollUp -> list with {type}.date filters.
-    // TODO(verify): camelCase filter field names below are derived from the documented pattern
-    // ("dailyRestingHeartRate.date", "dailyHeartRateVariability.date" are confirmed examples).
-    const [spo2, br, hrv, temp] = await Promise.all([
-      fetchDailySummaries(DATA_TYPES.spo2, "dailyOxygenSaturation", startDate, endDate),
-      fetchDailySummaries(DATA_TYPES.breathingRate, "dailyRespiratoryRate", startDate, endDate),
-      fetchDailySummaries(DATA_TYPES.hrv, "dailyHeartRateVariability", startDate, endDate),
-      fetchDailySummaries(DATA_TYPES.skinTemp, "dailySleepTemperatureDerivations", startDate, endDate),
+    const [spo2, breathing, hrv, temp] = await Promise.all([
+      fetchDailySummary(DATA_TYPES.spo2, "dailyOxygenSaturation", startDate, endDate,
+        (u) => num(u.averagePercentage)),
+      fetchDailySummary(DATA_TYPES.breathingRate, "dailyRespiratoryRate", startDate, endDate,
+        (u) => num(u.breathsPerMinute)),
+      fetchDailySummary(DATA_TYPES.hrv, "dailyHeartRateVariability", startDate, endDate,
+        (u) => num(u.averageHeartRateVariabilityMilliseconds ?? u.deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds)),
+      fetchDailySummary(DATA_TYPES.skinTemp, "dailySleepTemperatureDerivations", startDate, endDate,
+        (u) => {
+          const nightly = num(u.nightlyTemperatureCelsius);
+          const baseline = num(u.baselineTemperatureCelsius);
+          return baseline ? nightly - baseline : 0; // deviation from personal baseline
+        }),
     ]);
 
-    const allDates = new Set<string>([...spo2.keys(), ...br.keys(), ...hrv.keys(), ...temp.keys()]);
+    const allDates = new Set<string>([...spo2.keys(), ...breathing.keys(), ...hrv.keys(), ...temp.keys()]);
     return Array.from(allDates).sort().map((d) => ({
       date: d,
       spo2: roundTo(spo2.get(d) ?? 0, 1),
-      breathingRate: roundTo(br.get(d) ?? 0, 1),
+      breathingRate: roundTo(breathing.get(d) ?? 0, 1),
       hrv: roundTo(hrv.get(d) ?? 0),
       skinTempVariation: roundTo(temp.get(d) ?? 0, 1),
     }));
   }
 
   static async getWorkouts(startDate: string, endDate: string): Promise<WorkoutLog[]> {
-    // Exercise filters on session civil start time. Max pageSize 25 -> paginated.
-    const filter = `exercise.interval.civil_start_time >= "${startDate}" AND exercise.interval.civil_start_time < "${nextDay(endDate)}"`;
-    const sessions = await fetchList(DATA_TYPES.exercise, filter, 25);
+    // Exercise sessions filter on civil_start_time (ISO date). Max pageSize 25 -> paginated.
+    const filter =
+      `exercise.interval.civil_start_time >= "${startDate}" AND ` +
+      `exercise.interval.civil_start_time < "${nextDay(endDate)}"`;
+    const points = await fetchList(DATA_TYPES.exercise, filter, 25);
 
-    return sessions.map((p: any, i: number) => {
-      const w = rollupUnionValue(p) ?? p;
-      const start = w.interval?.startTime ?? w.interval?.civilStartTime ?? p.interval?.startTime ?? startDate;
-      const startStr = typeof start === "string" ? start : (fromCivilDateTime(start) ?? startDate);
-      return {
-        id: p.name ?? w.id ?? `workout_${startStr}_${i}`,
-        date: startStr.slice(0, 16).replace("T", " "),
-        type: w.exerciseType ?? w.activityName ?? w.type ?? "Exercise",
-        durationMinutes: roundTo(
-          extractNumber(w.durationMinutes) ??
-          (typeof w.duration === "string" && w.duration.endsWith("s") ? parseInt(w.duration) / 60 : null) ?? 0,
-        ),
-        avgHeartRate: roundTo(extractNumber(w.averageHeartRate ?? w.avgHeartRate) ?? 0),
-        calories: roundTo(extractNumber(w.calories ?? w.totalCalories) ?? 0),
-      };
-    });
+    return points
+      .map((p: any, i: number) => {
+        const ex = p.exercise;
+        if (!ex) return null;
+        const civilStart = ex.interval?.civilStartTime;
+        const dateStr = civilToDateStr(civilStart);
+        const timeStr = civilToTimeStr(civilStart);
+        const dateField = dateStr
+          ? (timeStr ? `${dateStr} ${timeStr}` : dateStr)
+          : (typeof ex.interval?.startTime === "string" ? ex.interval.startTime.slice(0, 16).replace("T", " ") : startDate);
+
+        const ms = ex.metricsSummary ?? {};
+        const duration = durationToMinutes(ex.activeDuration) || intervalMinutes(ex.interval);
+
+        return {
+          id: p.name ?? `exercise_${dateField}_${i}`,
+          date: dateField,
+          type: ex.displayName || prettyExerciseType(ex.exerciseType),
+          durationMinutes: roundTo(duration),
+          avgHeartRate: roundTo(num(ms.averageHeartRateBeatsPerMinute)),
+          calories: roundTo(num(ms.caloriesKcal)),
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => (b!.date).localeCompare(a!.date)) as WorkoutLog[];
   }
 
   static async getWeights(startDate: string, endDate: string): Promise<WeightRecord[]> {
-    const weights = await fetchDailyRollUp(DATA_TYPES.weight, startDate, endDate);
-    return Array.from(weights.entries()).sort().map(([date, weightKg]) => ({ date, weightKg: roundTo(weightKg, 1) }));
+    const points = await fetchRollupPoints(DATA_TYPES.weight, startDate, endDate);
+    return points
+      .map((p) => ({
+        date: civilToDateStr(p.civilStartTime),
+        weightKg: roundTo(num(p.weight?.weightGramsAvg) / 1000, 1), // grams -> kg
+      }))
+      .filter((w): w is WeightRecord => !!w.date && w.weightKg > 0)
+      .sort((a, b) => a.date.localeCompare(b.date));
   }
 }
