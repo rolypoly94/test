@@ -162,6 +162,18 @@ function extractNumber(obj: any): number | null {
   return entries[0].value;
 }
 
+/**
+ * Round a value to a fixed number of decimals, returning a clean Number (no IEEE-754
+ * artifacts like 0.30000000000000004). The simulated/demo data is pre-rounded, so the
+ * UI assumes clean numbers; live API values flow through extractNumber() unrounded and
+ * must be normalised here or they render with full float precision and overflow the cards.
+ */
+function roundTo(value: number | null, decimals = 0): number {
+  if (value === null || !isFinite(value)) return 0;
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+}
+
 /** The non-time field of a rollupDataPoint is the union value (e.g. "steps": {...}). */
 function rollupUnionValue(point: any): any {
   if (!point || typeof point !== "object") return null;
@@ -261,12 +273,12 @@ export class HealthApiClient {
     ]);
     return {
       date,
-      steps: steps.get(date) ?? 0,
+      steps: roundTo(steps.get(date) ?? 0),
       // TODO(verify): DistanceRollupValue unit (meters assumed; check [SHAPE]/values and adjust)
-      distanceKm: distance.has(date) ? Math.round((distance.get(date)! / 1000) * 100) / 100 : 0,
-      floors: floors.get(date) ?? 0,
-      caloriesBurned: calories.get(date) ?? 0,
-      activeZoneMinutes: azm.get(date) ?? 0,
+      distanceKm: distance.has(date) ? roundTo(distance.get(date)! / 1000, 2) : 0,
+      floors: roundTo(floors.get(date) ?? 0),
+      caloriesBurned: roundTo(calories.get(date) ?? 0),
+      activeZoneMinutes: roundTo(azm.get(date) ?? 0),
     };
   }
 
@@ -285,13 +297,13 @@ export class HealthApiClient {
         const bpm = extractNumber(union);
         if (bpm === null) return null;
         const time = typeof ts === "string" && ts.includes("T") ? ts.slice(11, 16) : "00:00";
-        return { time, bpm };
+        return { time, bpm: roundTo(bpm) };
       })
       .filter(Boolean) as { time: string; bpm: number }[];
 
     return {
       date,
-      restingHeartRate: restingMap.get(date) ?? 0,
+      restingHeartRate: roundTo(restingMap.get(date) ?? 0),
       intraday, // empty = "no data"; charts must not show fake values
     };
   }
@@ -309,7 +321,7 @@ export class HealthApiClient {
       const stages = sl.stages ?? sl.stageSummary ?? sl.levels?.summary ?? {};
       const stageMin = (name: string) => {
         const s = stages[name] ?? stages[`${name}Minutes`] ?? null;
-        return s === null ? 0 : (extractNumber(s) ?? 0);
+        return s === null ? 0 : roundTo(extractNumber(s) ?? 0);
       };
       const duration =
         extractNumber(sl.durationMinutes) ??
@@ -320,8 +332,8 @@ export class HealthApiClient {
       if (duration === 0 && stageMin("light") === 0 && stageMin("deep") === 0) logShapeOnce(DATA_TYPES.sleep, p);
       return {
         date,
-        durationMinutes: duration,
-        sleepScore: extractNumber(sl.sleepScore ?? sl.score ?? sl.efficiency) ?? 0,
+        durationMinutes: roundTo(duration),
+        sleepScore: roundTo(extractNumber(sl.sleepScore ?? sl.score ?? sl.efficiency) ?? 0),
         stages: {
           deepMinutes: stageMin("deep"),
           lightMinutes: stageMin("light"),
@@ -346,10 +358,10 @@ export class HealthApiClient {
     const allDates = new Set<string>([...spo2.keys(), ...br.keys(), ...hrv.keys(), ...temp.keys()]);
     return Array.from(allDates).sort().map((d) => ({
       date: d,
-      spo2: spo2.get(d) ?? 0,
-      breathingRate: br.get(d) ?? 0,
-      hrv: hrv.get(d) ?? 0,
-      skinTempVariation: temp.get(d) ?? 0,
+      spo2: roundTo(spo2.get(d) ?? 0, 1),
+      breathingRate: roundTo(br.get(d) ?? 0, 1),
+      hrv: roundTo(hrv.get(d) ?? 0),
+      skinTempVariation: roundTo(temp.get(d) ?? 0, 1),
     }));
   }
 
@@ -366,17 +378,18 @@ export class HealthApiClient {
         id: p.name ?? w.id ?? `workout_${startStr}_${i}`,
         date: startStr.slice(0, 16).replace("T", " "),
         type: w.exerciseType ?? w.activityName ?? w.type ?? "Exercise",
-        durationMinutes:
+        durationMinutes: roundTo(
           extractNumber(w.durationMinutes) ??
-          (typeof w.duration === "string" && w.duration.endsWith("s") ? Math.round(parseInt(w.duration) / 60) : null) ?? 0,
-        avgHeartRate: extractNumber(w.averageHeartRate ?? w.avgHeartRate) ?? 0,
-        calories: extractNumber(w.calories ?? w.totalCalories) ?? 0,
+          (typeof w.duration === "string" && w.duration.endsWith("s") ? parseInt(w.duration) / 60 : null) ?? 0,
+        ),
+        avgHeartRate: roundTo(extractNumber(w.averageHeartRate ?? w.avgHeartRate) ?? 0),
+        calories: roundTo(extractNumber(w.calories ?? w.totalCalories) ?? 0),
       };
     });
   }
 
   static async getWeights(startDate: string, endDate: string): Promise<WeightRecord[]> {
     const weights = await fetchDailyRollUp(DATA_TYPES.weight, startDate, endDate);
-    return Array.from(weights.entries()).sort().map(([date, weightKg]) => ({ date, weightKg }));
+    return Array.from(weights.entries()).sort().map(([date, weightKg]) => ({ date, weightKg: roundTo(weightKg, 1) }));
   }
 }
