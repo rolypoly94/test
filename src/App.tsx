@@ -105,7 +105,7 @@ function AppContent() {
             
             <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem", alignItems: "center" }}>
               <button onClick={() => syncData(true)} disabled={isSyncing}>
-                {isSyncing ? "Syncing..." : "Force Full 90-Day Sync"}
+                {isSyncing ? "Syncing..." : "Force Full 365-Day Sync"}
               </button>
               <button className="secondary" onClick={toggleDemoMode}>
                 Use Simulated Demo Data (Immediate View)

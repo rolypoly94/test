@@ -60,7 +60,7 @@ export function generateIntradayHeartRate(dateStr: string, baseResting: number):
 }
 
 /**
- * Builds a highly realistic 90-day simulation of all Fitbit Charge 6 metrics.
+ * Builds a highly realistic 365-day simulation of all Fitbit Charge 6 metrics.
  */
 export function generate90DayHealthData(): HealthDataStore {
   const activities: DailyActivity[] = [];
@@ -81,7 +81,7 @@ export function generate90DayHealthData(): HealthDataStore {
 
   let currentWeight = 78.5; // Sturdy start weight
 
-  for (let idx = 89; idx >= 0; idx--) {
+  for (let idx = 364; idx >= 0; idx--) {
     const dateStr = getDateString(idx);
     
     // Deterministic random seed based on date string to keep loads consistent
