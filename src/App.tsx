@@ -6,6 +6,7 @@ import { VitalsChart } from './components/charts/VitalsChart';
 import { WeightChart } from './components/charts/WeightChart';
 import { ProgressComparer } from './components/charts/ProgressComparer';
 import { WorkoutPanel } from './components/WorkoutPanel';
+import { TakeoutImport } from './components/TakeoutImport';
 
 function AppContent() {
   const {
@@ -45,6 +46,7 @@ function AppContent() {
               <button onClick={() => syncData().catch(() => {})} disabled={isSyncing}>
                 {isSyncing ? 'Syncing…' : 'Sync'}
               </button>
+              <TakeoutImport />
               <button className="secondary" onClick={disconnect}>Sign out</button>
             </>
           ) : (
@@ -52,6 +54,7 @@ function AppContent() {
               <button onClick={() => login().catch(() => {})} disabled={isSyncing}>
                 {isSyncing ? 'Syncing…' : 'Sign in with Google'}
               </button>
+              <TakeoutImport />
               {!isDemoMode && <button className="secondary" onClick={toggleDemoMode}>Demo mode</button>}
             </>
           )}

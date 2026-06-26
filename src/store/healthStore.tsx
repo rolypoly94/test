@@ -24,6 +24,7 @@ interface HealthStoreContextType {
   login: () => Promise<void>;
   disconnect: () => Promise<void>;
   syncData: (forceBackfill?: boolean) => Promise<void>;
+  importTakeoutData: (incoming: Partial<HealthDataStore>) => Promise<void>;
 }
 
 const HealthContext = createContext<HealthStoreContextType | undefined>(undefined);
@@ -388,6 +389,39 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
     }
   }, [isDemoMode]);
 
+  /**
+   * Merge Fitbit Takeout data into the existing store.
+   * Live API data (newer dates) wins over Takeout for overlapping days.
+   */
+  const importTakeoutData = useCallback(async (incoming: Partial<HealthDataStore>) => {
+    const base = await loadHealthData() ?? emptyStore;
+
+    const mergeByDate = <T extends { date: string }>(existing: T[], next: T[]): T[] => {
+      const map = new Map<string, T>();
+      // Takeout first (older), then existing API data overwrites for same dates
+      next.forEach((item) => map.set(item.date, item));
+      existing.forEach((item) => map.set(item.date, item));
+      return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
+    };
+
+    const merged: HealthDataStore = {
+      activities:   mergeByDate(base.activities,  incoming.activities  ?? []),
+      heartRates:   mergeByDate(base.heartRates,  incoming.heartRates  ?? []),
+      sleeps:       mergeByDate(base.sleeps,       incoming.sleeps      ?? []),
+      vitals:       mergeByDate(base.vitals,       incoming.vitals      ?? []),
+      weights:      mergeByDate(base.weights,      incoming.weights     ?? []),
+      workouts:     base.workouts,  // keep existing workouts (Takeout doesn't reliably have exercise logs)
+      lastSyncTime: base.lastSyncTime,
+    };
+
+    await saveHealthData(merged);
+    setHealthData(merged);
+    if (merged.activities.length > 0) {
+      setSelectedDate(merged.activities[merged.activities.length - 1].date);
+    }
+    setIsDemoMode(false);
+  }, []);
+
   return (
     <HealthContext.Provider
       value={{
@@ -404,6 +438,7 @@ export const HealthStoreProvider: React.FC<{ children: React.ReactNode }> = ({ c
         login,
         disconnect,
         syncData,
+        importTakeoutData,
       }}
     >
       {children}
